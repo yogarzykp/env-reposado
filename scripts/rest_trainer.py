@@ -344,6 +344,44 @@ def rest_loop(
     }
 
 
+def _synthetic_format_samples() -> List[Dict[str, object]]:
+    """A handful of trivial {messages} rows, used only to exercise the SFT+merge
+    path when the (weak) smoke model solves too few real tasks."""
+    qa = [
+        ("What is 2+2?", "Thought:\nsimple sum.\n\nAction:\n4"),
+        ("Name a primary color.", "Thought:\nred is primary.\n\nAction:\nred"),
+        ("What is the capital of France?", "Thought:\nit is Paris.\n\nAction:\nParis"),
+        ("How many days in a week?", "Thought:\nseven.\n\nAction:\n7"),
+    ]
+    sys = "You answer concisely in the Thought/Action format."
+    return [
+        {"messages": [
+            {"role": "system", "content": sys},
+            {"role": "user", "content": u},
+            {"role": "assistant", "content": a},
+        ]}
+        for u, a in qa * 2
+    ]
+
+
+def run_skill_only(cfg: RestBucket, base_model_path: str, out_dir: str,
+                   n_tasks: int = 8, log_fn: Callable[[str], None] = print) -> Optional[str]:
+    """No env-server needed: validate generation + inner SFT + final merge using
+    the self-instruct skill stream. A smoke convenience, not a tournament path."""
+    gen = build_vllm_generate_fn(base_model_path, None, cfg)
+    samples = collect_skill_samples(gen, n_tasks=n_tasks)
+    log_fn(f"[skill-only] model solved {len(samples)}/{n_tasks} skill tasks")
+    if len(samples) < 2:
+        log_fn("[skill-only] too few solved; adding synthetic rows to exercise SFT+merge")
+        samples = samples + _synthetic_format_samples()
+    dataset_path = to_hf_dataset(samples, os.path.join(out_dir, "skill_data"))
+    adapter = run_inner_sft(base_model_path, dataset_path,
+                            os.path.join(out_dir, "skill_sft"), cfg)
+    final = merge_and_save_final(base_model_path, adapter, out_dir, log_fn)
+    log_fn(f"[skill-only] done: n_samples={len(samples)} final_model={final}")
+    return final
+
+
 def _resolve_inputs(argv=None) -> Dict[str, object]:
     """Resolve run inputs from CLI args, falling back to env vars, then to a
     training-request JSON (the shape text_trainer passes). CLI/env win."""
@@ -379,10 +417,18 @@ def main(argv=None) -> None:
     inp = _resolve_inputs(argv)
     base_model_path, out_dir = inp["model_path"], inp["out_dir"]
     endpoints, task_id = inp["endpoints"], inp["task_id"]
-    if not base_model_path or not endpoints:
-        raise RuntimeError("model_path and env_server_urls are required (CLI/env/request)")
-
+    if not base_model_path:
+        raise RuntimeError("model_path is required (CLI/env/request)")
     cfg = get_rest_config(estimate_param_billions(base_model_path))
+
+    # No-env-server validation path (smoke): generation + SFT + merge only.
+    if os.environ.get("REST_SKILL_ONLY") == "1":
+        run_skill_only(cfg, base_model_path, out_dir,
+                       n_tasks=int(os.environ.get("REST_SKILL_TASKS") or "8") or 8)
+        return
+
+    if not endpoints:
+        raise RuntimeError("env_server_urls required for game training (set ENVIRONMENT_SERVER_URLS)")
     spec = get_spec_by_task_id(int(task_id)) if task_id else get_spec(os.environ.get("GAME", "leduc_poker"))
     result = rest_loop(cfg, endpoints[0], base_model_path, out_dir, spec=spec,
                        skill_tasks_per_iter=int(os.environ.get("REST_SKILL_TASKS", "0")))

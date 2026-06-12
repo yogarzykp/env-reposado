@@ -16,6 +16,10 @@ ENVIRONMENT_SERVER_URLS="http://localhost:8000"
 GAME="leduc_poker"                          # goofspiel|liars_dice|leduc_poker|gin_rummy
 TASK_ID=""                                  # optional; overrides GAME if set
 
+# game       = full ReST loop (NEEDS a live env-server at ENVIRONMENT_SERVER_URLS)
+# skill-only = validate generation + SFT + merge WITHOUT an env-server
+SMOKE_MODE="game"
+
 HOST_OUTPUT_DIR="$HOME/rest_smoke_out"       # trained model lands here (host)
 HF_CACHE_DIR="$HOME/.cache/huggingface"      # persist model downloads
 
@@ -36,8 +40,10 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONTAINER_OUTPUT="/workspace/rest_smoke"
 mkdir -p "$HOST_OUTPUT_DIR" "$HF_CACHE_DIR"
 
+if [ "$SMOKE_MODE" = "skill-only" ]; then REST_SKILL_ONLY=1; else REST_SKILL_ONLY=0; fi
+
 export MODEL_PATH ENVIRONMENT_SERVER_URLS GAME TASK_ID
-export REST_ITERS REST_SEEDS_PER_ITER REST_N_PER_SEED REST_TOTAL_SECONDS CFR_ITERS REST_SKILL_TASKS
+export REST_ITERS REST_SEEDS_PER_ITER REST_N_PER_SEED REST_TOTAL_SECONDS CFR_ITERS REST_SKILL_TASKS REST_SKILL_ONLY
 export HF_REPO HF_TOKEN HF_PRIVATE
 
 # Mount a local model dir read-only if MODEL_PATH points at one.
@@ -49,7 +55,7 @@ docker run --rm -i --gpus "$GPUS" --network host \
   -e MODEL_PATH -e ENVIRONMENT_SERVER_URLS -e GAME -e TASK_ID \
   -e OUTPUT_DIR="$CONTAINER_OUTPUT" \
   -e REST_ITERS -e REST_SEEDS_PER_ITER -e REST_N_PER_SEED -e REST_TOTAL_SECONDS \
-  -e CFR_ITERS -e REST_SKILL_TASKS -e BNB_CUDA_VERSION=122 \
+  -e CFR_ITERS -e REST_SKILL_TASKS -e REST_SKILL_ONLY -e BNB_CUDA_VERSION=122 \
   -e HF_REPO -e HF_TOKEN -e HF_PRIVATE \
   -v "$REPO/scripts:/workspace/scripts" \
   -v "$HOST_OUTPUT_DIR:$CONTAINER_OUTPUT" \
