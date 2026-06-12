@@ -32,6 +32,7 @@ from game_spec import GameSpec, get_spec, get_spec_by_task_id
 from selfplay.rollout_collector import Episode, GenerateFn, play_episode
 from selfplay.trajectory_filter import filter_and_extract
 from selfplay.cot_synthesizer import synthesize
+from selfplay.skill_selfinstruct import collect_skill_samples
 
 LEDUC_GAME_ID = 200000000
 
@@ -251,6 +252,7 @@ def rest_loop(
     budget: Optional[RestBudget] = None,
     kill: Optional[KillCriterion] = None,
     base_seed: int = 12345,
+    skill_tasks_per_iter: int = 0,
     log_fn: Callable[[str], None] = print,
 ) -> Dict[str, object]:
     spec = spec or get_spec("leduc_poker")
@@ -276,6 +278,13 @@ def rest_loop(
         steps = filter_and_extract(episodes, keep_fraction=keep_frac,
                                    potential_fn=spec.potential_fn, feature_fn=spec.features_fn)
         samples = synthesize(steps, gen_fn, cold_start=cold, system_prompt=spec.system_prompt)
+
+        # Optional skill stream: self-instruct bash, exec-verified (same {messages}).
+        n_skill = 0
+        if skill_tasks_per_iter > 0:
+            skill = collect_skill_samples(gen_fn, n_tasks=skill_tasks_per_iter, seed=base_seed + it)
+            samples = samples + skill
+            n_skill = len(skill)
         accumulated.extend(samples)
 
         # Improve: re-anchor SFT on the accumulated dataset.
@@ -288,8 +297,8 @@ def rest_loop(
         history.append(rec)
         log_fn(
             f"[ReST iter {it}] win_rate={rec.win_rate:.3f} valid_rate={rec.valid_rate:.3f} "
-            f"sims={sims} keep={keep_frac} new={rec.n_new_samples} total={rec.n_total_samples} "
-            f"cold_start={cold}"
+            f"sims={sims} keep={keep_frac} new={rec.n_new_samples} (skill={n_skill}) "
+            f"total={rec.n_total_samples} cold_start={cold}"
         )
 
         kill.update(stats["win_rate"])
@@ -304,20 +313,48 @@ def rest_loop(
     }
 
 
-def main() -> None:
-    base_model_path = os.environ.get("MODEL_PATH", "")
-    out_dir = os.environ.get("OUTPUT_DIR", "/workspace/rest_output")
-    raw_urls = os.environ.get("ENVIRONMENT_SERVER_URLS", "")
-    endpoints = [u.strip() for u in raw_urls.split(",") if u.strip()]
+def _resolve_inputs(argv=None) -> Dict[str, object]:
+    """Resolve run inputs from CLI args, falling back to env vars, then to a
+    training-request JSON (the shape text_trainer passes). CLI/env win."""
+    import argparse
+
+    p = argparse.ArgumentParser(description="ReST env trainer")
+    p.add_argument("--model_path", default=None)
+    p.add_argument("--output_dir", default=None)
+    p.add_argument("--task_id", default=None)
+    p.add_argument("--env_server_urls", default=None)
+    p.add_argument("--request_path", default=None)
+    args, _ = p.parse_known_args(argv)
+
+    req: Dict[str, object] = {}
+    req_path = args.request_path or os.environ.get("REQUEST_PATH")
+    if req_path and os.path.exists(req_path):
+        try:
+            with open(req_path) as f:
+                req = json.load(f)
+        except Exception:
+            req = {}
+    tr = req.get("train_request", req) if isinstance(req, dict) else {}
+
+    model_path = args.model_path or os.environ.get("MODEL_PATH") or tr.get("model") or tr.get("model_path") or ""
+    out_dir = args.output_dir or os.environ.get("OUTPUT_DIR") or tr.get("output_dir") or "/workspace/rest_output"
+    task_id = args.task_id or os.environ.get("TASK_ID") or tr.get("task_id")
+    raw_urls = args.env_server_urls or os.environ.get("ENVIRONMENT_SERVER_URLS", "")
+    endpoints = [u.strip() for u in str(raw_urls).split(",") if u.strip()]
+    return {"model_path": model_path, "out_dir": out_dir, "task_id": task_id, "endpoints": endpoints}
+
+
+def main(argv=None) -> None:
+    inp = _resolve_inputs(argv)
+    base_model_path, out_dir = inp["model_path"], inp["out_dir"]
+    endpoints, task_id = inp["endpoints"], inp["task_id"]
     if not base_model_path or not endpoints:
-        raise RuntimeError("MODEL_PATH and ENVIRONMENT_SERVER_URLS are required")
+        raise RuntimeError("model_path and env_server_urls are required (CLI/env/request)")
 
     cfg = get_rest_config(estimate_param_billions(base_model_path))
-    if os.environ.get("TASK_ID"):
-        spec = get_spec_by_task_id(int(os.environ["TASK_ID"]))
-    else:
-        spec = get_spec(os.environ.get("GAME", "leduc_poker"))
-    result = rest_loop(cfg, endpoints[0], base_model_path, out_dir, spec=spec)
+    spec = get_spec_by_task_id(int(task_id)) if task_id else get_spec(os.environ.get("GAME", "leduc_poker"))
+    result = rest_loop(cfg, endpoints[0], base_model_path, out_dir, spec=spec,
+                       skill_tasks_per_iter=int(os.environ.get("REST_SKILL_TASKS", "0")))
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, "rest_history.json"), "w") as f:
         json.dump(result["history"], f, indent=2)

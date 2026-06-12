@@ -429,9 +429,19 @@ def main():
         train_cmd = train_info["run_cmd"]
 
     elif args.task_type == TaskType.ENVIRONMENTTASK.value:
-        train_info = get_env_training_json(train_info)
-        tokenize_cmd = ""
-        train_cmd = train_info["run_cmd"]
+        if os.environ.get("REST_TRAINER", "0") == "1":
+            # env-reposado: route env training to the ReST loop. The placeholder
+            # values are substituted by replace_args_in_cmd (needs a trailing
+            # space and a value token after each --arg).
+            train_info["run_cmd"] = (
+                "python3 rest_trainer.py --output_dir output_dir --request_path request_path "
+            )
+            tokenize_cmd = ""
+            train_cmd = train_info["run_cmd"]
+        else:
+            train_info = get_env_training_json(train_info)
+            tokenize_cmd = ""
+            train_cmd = train_info["run_cmd"]
     else:
         raise ValueError(f"Task type {args.task_type} not supported")
 
