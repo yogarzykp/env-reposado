@@ -8,6 +8,12 @@ set -e
 source /workspace/.grpo_env/bin/activate
 cd /workspace/scripts
 
+# The image enables hf_transfer but the package isn't installed -> downloads
+# crash. Disable it (normal, slightly slower download) unless hf_transfer exists.
+if ! python3 -c "import hf_transfer" >/dev/null 2>&1; then
+  export HF_HUB_ENABLE_HF_TRANSFER=0
+fi
+
 echo "python: $(command -v python3)"
 python3 -c "import vllm, trl, transformers, peft; print('versions: vllm', vllm.__version__, '| trl', trl.__version__, '| transformers', transformers.__version__, '| peft', peft.__version__)"
 
