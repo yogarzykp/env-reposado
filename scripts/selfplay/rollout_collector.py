@@ -233,9 +233,11 @@ def play_episode(
 ) -> Episode:
     """Play a single self-play episode and return the recorded trajectory.
 
-    On an invalid model action the episode is terminated (the move is recorded as
-    invalid); such episodes will not pass the downstream win-gate, so we do not
-    inject any fallback "expert" action here.
+    On an invalid model action the turn is recorded as invalid and a *random*
+    legal action is injected so the episode can continue (better cold-start data
+    yield). The fallback is deliberately random, not expert, to keep the
+    format-priming red line: we never hand-code strategy into the data. Invalid
+    turns carry ``valid=False`` and are excluded from the SFT set by the filter.
     """
     episode_id, observation = reset_episode(endpoint, game_id, opponent_sims, seed, timeout)
     episode = Episode(game_id=game_id, opponent_sims=opponent_sims, seed=seed)
@@ -251,17 +253,17 @@ def play_episode(
         valid = bool(action_id)
         features = feature_fn(observation) if feature_fn else {}
 
-        if not valid:
+        if valid:
+            action_to_send = action_id
+        else:
             episode.num_invalid += 1
-            episode.turns.append(
-                Turn(observation, legal, user_prompt, completion, "", 0.0, False, features)
-            )
-            episode.done = True
-            break
+            action_to_send = _random_fallback_action(legal)
 
-        next_obs, reward, done = step_episode(endpoint, episode_id, action_id, timeout)
+        next_obs, reward, done = step_episode(endpoint, episode_id, action_to_send, timeout)
+        # Record the model's parsed action_id (empty when invalid), not the
+        # fallback: invalid turns must not teach the injected action.
         episode.turns.append(
-            Turn(observation, legal, user_prompt, completion, action_id, reward, True, features)
+            Turn(observation, legal, user_prompt, completion, action_id, reward, valid, features)
         )
         episode.terminal_reward = reward
         observation = next_obs
@@ -270,6 +272,11 @@ def play_episode(
             break
 
     return episode
+
+
+def _random_fallback_action(legal_actions: Dict[str, str]) -> str:
+    """A uniformly random legal action id (generic, never expert strategy)."""
+    return random.choice(list(legal_actions.keys()))
 
 
 def _chat(user_prompt: str) -> str:
@@ -340,7 +347,9 @@ def _selftest() -> None:
 
     # A scripted generator + patched client lets us run a fake episode. We patch
     # this module's own globals (not a re-import) to stay correct under `-m`.
-    scripted = iter(["Thought:\nstrong.\nAction:\n2", "Thought:\ncall.\nAction:\n1"])
+    # Turn 1 is invalid ("9" is not legal) -> random fallback, episode continues;
+    # turn 2 is a valid winning move.
+    scripted = iter(["Thought:\nconfused.\nAction:\n9", "Thought:\ncall.\nAction:\n1"])
     steps = iter([("Pot: 4\nLegal Actions:\n0 -> Fold\n1 -> Call\nYour choice:", 0.0, False),
                   ("done", 1.0, True)])
     g = globals()
@@ -348,7 +357,9 @@ def _selftest() -> None:
     g["step_episode"] = lambda *a, **k: next(steps)
     ep = play_episode("http://x", LEDUC_TASK_ID_RANGE[0], 5,
                       lambda prompts, n=1, temperature=1.0: [[next(scripted)]])
-    assert ep.won and ep.num_turns == 2 and ep.num_invalid == 0, ep
+    assert ep.won and ep.num_turns == 2 and ep.num_invalid == 1, ep
+    assert ep.turns[0].valid is False and ep.turns[0].action_id == "", ep.turns[0]
+    assert ep.turns[1].valid is True and ep.turns[1].action_id == "1", ep.turns[1]
     print("rollout_collector selftest OK")
 
 
