@@ -210,6 +210,31 @@ def run_inner_sft(base_model_path: str, dataset_path: str, out_dir: str,
     return adapter_dir
 
 
+def merge_and_save_final(base_model_path: str, adapter_path: Optional[str],
+                         out_dir: str, log_fn: Callable[[str], None] = print) -> Optional[str]:
+    """Finalise: merge the final LoRA adapter into the base and save a full model
+    to ``out_dir`` so the validator can load/serve it directly.
+
+    This is the env-reposado finalisation step (not a standalone merge utility):
+    the loop serves LoRA adapters directly via vLLM between iterations, so a merge
+    is only needed once, at the end, for the uploaded artefact.
+    """
+    if not adapter_path:
+        log_fn("[ReST] no adapter to merge; skipping final merge")
+        return None
+    import torch  # lazy
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    log_fn(f"[ReST] merging final adapter {adapter_path} -> {out_dir}")
+    tokenizer = AutoTokenizer.from_pretrained(base_model_path)
+    base = AutoModelForCausalLM.from_pretrained(base_model_path, torch_dtype=torch.bfloat16)
+    merged = PeftModel.from_pretrained(base, adapter_path).merge_and_unload()
+    merged.save_pretrained(out_dir, safe_serialization=True)
+    tokenizer.save_pretrained(out_dir)
+    return out_dir
+
+
 def collect_until_deadline(endpoint: str, generate_fn: GenerateFn, seeds: List[int],
                            cfg: RestBucket, opponent_sims: int, deadline: float,
                            spec: GameSpec) -> List[Episode]:
@@ -237,6 +262,7 @@ GenFactory = Callable[[str, Optional[str], RestBucket], GenerateFn]
 SftFn = Callable[[str, str, str, RestBucket], str]
 DatasetFn = Callable[[List[Dict[str, object]], str], str]
 CollectFn = Callable[..., List[Episode]]
+MergeFn = Callable[..., Optional[str]]
 
 
 def rest_loop(
@@ -249,6 +275,7 @@ def rest_loop(
     sft_fn: SftFn = run_inner_sft,
     collect_fn: CollectFn = collect_until_deadline,
     dataset_fn: DatasetFn = to_hf_dataset,
+    merge_fn: MergeFn = merge_and_save_final,
     budget: Optional[RestBudget] = None,
     kill: Optional[KillCriterion] = None,
     base_seed: int = 12345,
@@ -306,8 +333,12 @@ def rest_loop(
             log_fn(f"[ReST] kill-criterion hit after iter {it}: win-rate not improving; stopping.")
             break
 
+    # Finalise: merge the last adapter into the base so OUTPUT_DIR is a full model.
+    final_model_dir = merge_fn(base_model_path, adapter_path, out_dir, log_fn)
+
     return {
         "adapter_path": adapter_path,
+        "final_model_dir": final_model_dir,
         "n_samples": len(accumulated),
         "history": [vars(h) for h in history],
     }
@@ -358,7 +389,8 @@ def main(argv=None) -> None:
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, "rest_history.json"), "w") as f:
         json.dump(result["history"], f, indent=2)
-    print(f"[ReST] done: {result['n_samples']} samples, adapter={result['adapter_path']}")
+    print(f"[ReST] done: {result['n_samples']} samples, adapter={result['adapter_path']}, "
+          f"final_model={result['final_model_dir']}")
 
 
 # --------------------------------------------------------------------------- #
@@ -413,14 +445,18 @@ def _selftest() -> None:
     def mock_dataset(samples, out):
         return f"{out}::{len(samples)}"
 
+    def mock_merge(base, adapter, out, log):
+        return f"{out}/final" if adapter else None
+
     cfg = get_rest_config(7.0)
     cfg.num_iters = 2
     result = rest_loop(cfg, "http://x", "/models/base-7b", "/tmp/out",
                        gen_factory=mock_gen_factory, sft_fn=mock_sft,
                        collect_fn=mock_collect, dataset_fn=mock_dataset,
-                       budget=RestBudget(1000), kill=KillCriterion(),
+                       merge_fn=mock_merge, budget=RestBudget(1000), kill=KillCriterion(),
                        log_fn=lambda *_: None)
     assert len(result["history"]) == 2, result
+    assert result["final_model_dir"] == "/tmp/out/final", result  # final merge ran
     # Re-anchor: every SFT call uses the base model path, never an adapter.
     assert all(c["base"] == "/models/base-7b" for c in sft_calls), sft_calls
     # Accumulation grows monotonically across iterations.
@@ -432,7 +468,8 @@ def _selftest() -> None:
                         spec=get_spec("gin_rummy"),
                         gen_factory=mock_gen_factory, sft_fn=mock_sft,
                         collect_fn=mock_collect, dataset_fn=mock_dataset,
-                        budget=RestBudget(1000), kill=KillCriterion(), log_fn=lambda *_: None)
+                        merge_fn=mock_merge, budget=RestBudget(1000), kill=KillCriterion(),
+                        log_fn=lambda *_: None)
     assert len(res_gin["history"]) == 2, res_gin
     print("rest_trainer selftest OK")
 
