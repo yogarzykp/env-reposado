@@ -206,7 +206,7 @@ def run_inner_sft(base_model_path: str, dataset_path: str, out_dir: str,
         per_device_train_batch_size=int(os.environ.get("REST_SFT_BATCH", "4")),
         gradient_accumulation_steps=int(os.environ.get("REST_SFT_GA", "4")),
         bf16=True,
-        logging_steps=10,
+        logging_steps=int(os.environ.get("REST_SFT_LOG_STEPS") or "5"),
         save_strategy="no",
         assistant_only_loss=use_assistant_only,
         report_to=[],
@@ -248,8 +248,13 @@ def merge_and_save_final(base_model_path: str, adapter_path: Optional[str],
 
 def collect_until_deadline(endpoint: str, generate_fn: GenerateFn, seeds: List[int],
                            cfg: RestBucket, opponent_sims: int, deadline: float,
-                           spec: GameSpec) -> List[Episode]:
-    """Best-of-N self-play that stops at the wall-clock deadline."""
+                           spec: GameSpec, log_fn: Callable[[str], None] = print) -> List[Episode]:
+    """Best-of-N self-play that stops at the wall-clock deadline.
+
+    Logs running win/valid rate every REST_GROW_LOG_EVERY episodes so the (long)
+    Grow phase is observable rather than silent.
+    """
+    log_every = int(os.environ.get("REST_GROW_LOG_EVERY") or "16")
     episodes: List[Episode] = []
     for seed in seeds:
         if time.monotonic() >= deadline:
@@ -262,6 +267,14 @@ def collect_until_deadline(endpoint: str, generate_fn: GenerateFn, seeds: List[i
                              temperature=cfg.temperature, seed=seed,
                              feature_fn=spec.features_fn, system_prompt=spec.system_prompt)
             )
+            n = len(episodes)
+            if log_every > 0 and n % log_every == 0:
+                s = episode_stats(episodes)
+                remaining = max(0.0, deadline - time.monotonic())
+                log_fn(f"  [grow] episodes={n} wins={sum(e.won for e in episodes)} "
+                       f"win_rate={s['win_rate']:.3f} valid_rate={s['valid_rate']:.3f} "
+                       f"t_left={remaining:.0f}s")
+    log_fn(f"  [grow] collected {len(episodes)} episodes (sims={opponent_sims})")
     return episodes
 
 
@@ -305,6 +318,9 @@ def rest_loop(
         keep_frac = schedule_at(cfg.keep_fraction_schedule, it)
         deadline = budget.iteration_deadline(it, cfg.num_iters)
 
+        t0 = time.monotonic()
+        log_fn(f"[ReST iter {it}] grow: opponent_sims={sims} seeds={cfg.seeds_per_iter} keep={keep_frac}")
+
         # Grow: generator is base + previous adapter (the improving policy).
         gen_fn = gen_factory(base_model_path, adapter_path, cfg)
         seeds = sample_seeds(it, cfg.seeds_per_iter, base_seed)
@@ -315,6 +331,7 @@ def rest_loop(
         cold = it == 0 and stats["valid_rate"] < cfg.cold_start_valid_threshold
         steps = filter_and_extract(episodes, keep_fraction=keep_frac,
                                    potential_fn=spec.potential_fn, feature_fn=spec.features_fn)
+        log_fn(f"  [label] {len(steps)} winning steps -> STaR rationalize (cold_start={cold})")
         samples = synthesize(steps, gen_fn, cold_start=cold, system_prompt=spec.system_prompt)
 
         # Optional skill stream: self-instruct bash, exec-verified (same {messages}).
@@ -326,6 +343,7 @@ def rest_loop(
         accumulated.extend(samples)
 
         # Improve: re-anchor SFT on the accumulated dataset.
+        log_fn(f"  [improve] SFT on {len(accumulated)} accumulated samples (re-anchor from base)")
         dataset_path = dataset_fn(accumulated, os.path.join(out_dir, f"iter{it}_data"))
         adapter_path = sft_fn(base_model_path, dataset_path,
                               os.path.join(out_dir, f"iter{it}_sft"), cfg)
@@ -334,9 +352,9 @@ def rest_loop(
                         len(samples), len(accumulated), adapter_path)
         history.append(rec)
         log_fn(
-            f"[ReST iter {it}] win_rate={rec.win_rate:.3f} valid_rate={rec.valid_rate:.3f} "
-            f"sims={sims} keep={keep_frac} new={rec.n_new_samples} (skill={n_skill}) "
-            f"total={rec.n_total_samples} cold_start={cold}"
+            f"[ReST iter {it}] DONE win_rate={rec.win_rate:.3f} valid_rate={rec.valid_rate:.3f} "
+            f"episodes={rec.n_episodes} new={rec.n_new_samples} (skill={n_skill}) "
+            f"total={rec.n_total_samples} took={time.monotonic() - t0:.0f}s"
         )
 
         kill.update(stats["win_rate"])
