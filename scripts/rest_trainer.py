@@ -475,4 +475,8 @@ def _selftest() -> None:
 
 
 if __name__ == "__main__":
-    _selftest()
+    import sys
+    if "--selftest" in sys.argv:
+        _selftest()
+    else:
+        main()
