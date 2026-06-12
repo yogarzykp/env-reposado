@@ -129,6 +129,82 @@ def potential_leduc(features: Dict[str, object]) -> float:
     return max(0.0, min(1.0, phi))
 
 
+# --------------------------------------------------------------------------- #
+# Potentials for the other three games (heuristic; refined once real
+# observations are seen at smoke). Each returns Phi in [0, 1] and falls back to
+# 0.5 when the relevant signal cannot be parsed.
+# --------------------------------------------------------------------------- #
+
+
+def gin_rummy_features(observation: str) -> Dict[str, object]:
+    feats: Dict[str, object] = {"deadwood": None, "can_knock": False}
+    if not observation:
+        return feats
+    m = re.search(r"deadwood[:\s=]+(\d+)", observation, re.IGNORECASE)
+    if m:
+        feats["deadwood"] = int(m.group(1))
+    if re.search(r"\bknock\b", observation, re.IGNORECASE) and "55 ->" in observation:
+        feats["can_knock"] = True
+    return feats
+
+
+def potential_gin_rummy(features: Dict[str, object]) -> float:
+    """Lower deadwood is better; a knock-ready hand gets a small bonus."""
+    dw = features.get("deadwood")
+    if dw is None:
+        return 0.5
+    phi = 1.0 - min(int(dw), 100) / 100.0
+    if features.get("can_knock"):
+        phi = min(1.0, phi + 0.1)
+    return max(0.0, min(1.0, phi))
+
+
+def liars_dice_features(observation: str) -> Dict[str, object]:
+    feats: Dict[str, object] = {"bid_qty": None, "bid_face": None, "total_dice": None}
+    if not observation:
+        return feats
+    m = re.search(r"(?:current )?bid[:\s]+(\d+)\D+(\d+)", observation, re.IGNORECASE)
+    if m:
+        feats["bid_qty"], feats["bid_face"] = int(m.group(1)), int(m.group(2))
+    t = re.search(r"total dice[:\s]+(\d+)", observation, re.IGNORECASE)
+    if t:
+        feats["total_dice"] = int(t.group(1))
+    return feats
+
+
+def potential_liars_dice(features: Dict[str, object]) -> float:
+    """Higher standing-bid quantity relative to total dice = riskier position."""
+    qty, total = features.get("bid_qty"), features.get("total_dice")
+    if qty is None or not total:
+        return 0.5
+    # Expected count of any face ~ total/6; a bid far above that is precarious.
+    expected = total / 6.0
+    ratio = expected / max(1, int(qty))
+    return max(0.0, min(1.0, ratio))
+
+
+def goofspiel_features(observation: str) -> Dict[str, object]:
+    feats: Dict[str, object] = {"own_score": None, "opp_score": None, "prize": None}
+    if not observation:
+        return feats
+    scores = re.findall(r"score[:\s]+(\d+)", observation, re.IGNORECASE)
+    if len(scores) >= 2:
+        feats["own_score"], feats["opp_score"] = int(scores[0]), int(scores[1])
+    p = re.search(r"prize[^\d]*(\d+)", observation, re.IGNORECASE)
+    if p:
+        feats["prize"] = int(p.group(1))
+    return feats
+
+
+def potential_goofspiel(features: Dict[str, object]) -> float:
+    """Score margin mapped to [0, 1] via a soft squashing."""
+    own, opp = features.get("own_score"), features.get("opp_score")
+    if own is None or opp is None:
+        return 0.5
+    import math
+    return 0.5 + 0.5 * math.tanh((own - opp) / 20.0)
+
+
 # Potential of a terminal (absorbing) state is 0 by convention.
 TERMINAL_POTENTIAL = 0.0
 
