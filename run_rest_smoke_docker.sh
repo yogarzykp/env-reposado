@@ -9,7 +9,10 @@
 
 # ----------------------------- CONFIG (edit me) ------------------------------
 IMAGE="standalone-text-trainer:latest"
-GPUS="all"                                  # or:  '"device=0"'  for one GPU
+GPUS="all"                                  # docker --gpus value
+# Pin the process to ONE GPU: HF Trainer auto-uses DataParallel across visible
+# GPUs, which crashes with NCCL on PCIe/no-NVLink boxes. Single GPU avoids it.
+CUDA_VISIBLE_DEVICES="0"
 
 MODEL_PATH="Qwen/Qwen2.5-0.5B-Instruct"     # HF id (downloaded) OR a local path
 ENVIRONMENT_SERVER_URLS="http://localhost:8000"
@@ -42,7 +45,7 @@ mkdir -p "$HOST_OUTPUT_DIR" "$HF_CACHE_DIR"
 
 if [ "$SMOKE_MODE" = "skill-only" ]; then REST_SKILL_ONLY=1; else REST_SKILL_ONLY=0; fi
 
-export MODEL_PATH ENVIRONMENT_SERVER_URLS GAME TASK_ID
+export MODEL_PATH ENVIRONMENT_SERVER_URLS GAME TASK_ID CUDA_VISIBLE_DEVICES
 export REST_ITERS REST_SEEDS_PER_ITER REST_N_PER_SEED REST_TOTAL_SECONDS CFR_ITERS REST_SKILL_TASKS REST_SKILL_ONLY
 export HF_REPO HF_TOKEN HF_PRIVATE
 
@@ -56,6 +59,7 @@ docker run --rm -i --gpus "$GPUS" --network host \
   -e OUTPUT_DIR="$CONTAINER_OUTPUT" \
   -e REST_ITERS -e REST_SEEDS_PER_ITER -e REST_N_PER_SEED -e REST_TOTAL_SECONDS \
   -e CFR_ITERS -e REST_SKILL_TASKS -e REST_SKILL_ONLY -e BNB_CUDA_VERSION=122 \
+  -e CUDA_VISIBLE_DEVICES \
   -e HF_REPO -e HF_TOKEN -e HF_PRIVATE \
   -v "$REPO/scripts:/workspace/scripts" \
   -v "$HOST_OUTPUT_DIR:$CONTAINER_OUTPUT" \

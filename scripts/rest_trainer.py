@@ -131,8 +131,10 @@ def build_vllm_generate_fn(base_model_path: str, adapter_path: Optional[str],
     from vllm.lora.request import LoRARequest
 
     tokenizer = AutoTokenizer.from_pretrained(base_model_path)
+    # Leave GPU headroom so the inner SFT can share the same device after gen.
     llm = LLM(model=base_model_path, enable_lora=adapter_path is not None,
-              max_lora_rank=cfg.lora_r, dtype="bfloat16")
+              max_lora_rank=cfg.lora_r, dtype="bfloat16",
+              gpu_memory_utilization=float(os.environ.get("REST_VLLM_GPU_UTIL", "0.45")))
     lora_req = LoRARequest("rest_adapter", 1, adapter_path) if adapter_path else None
 
     def generate_fn(message_batches, n: int = 1, temperature: float = 1.0):
