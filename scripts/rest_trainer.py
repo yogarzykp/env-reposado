@@ -188,6 +188,15 @@ def run_inner_sft(base_model_path: str, dataset_path: str, out_dir: str,
 
     lora = LoraConfig(r=cfg.lora_r, lora_alpha=cfg.lora_alpha, lora_dropout=0.05,
                       bias="none", task_type="CAUSAL_LM")
+
+    # assistant_only_loss needs a chat template with a {% generation %} block to
+    # build the assistant mask. Qwen/Llama default templates lack it -> fall back
+    # to full-sequence SFT (standard, safe) instead of crashing.
+    use_assistant_only = "endgeneration" in (tokenizer.chat_template or "")
+    if not use_assistant_only:
+        print("[ReST] chat template has no {% generation %} mask; "
+              "assistant_only_loss disabled (full-sequence SFT)")
+
     sft_args = SFTConfig(
         output_dir=out_dir,
         num_train_epochs=cfg.inner_sft_epochs,
@@ -197,7 +206,7 @@ def run_inner_sft(base_model_path: str, dataset_path: str, out_dir: str,
         bf16=True,
         logging_steps=10,
         save_strategy="no",
-        assistant_only_loss=True,  # mask user/system tokens
+        assistant_only_loss=use_assistant_only,
         report_to=[],
     )
     trainer = SFTTrainer(
