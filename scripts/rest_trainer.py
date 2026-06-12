@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
 from rest_config import RestBucket, get_rest_config, estimate_param_billions, schedule_at
+from game_spec import GameSpec, get_spec, get_spec_by_task_id
 from selfplay.rollout_collector import Episode, GenerateFn, play_episode
 from selfplay.trajectory_filter import filter_and_extract
 from selfplay.cot_synthesizer import synthesize
@@ -209,8 +210,8 @@ def run_inner_sft(base_model_path: str, dataset_path: str, out_dir: str,
 
 
 def collect_until_deadline(endpoint: str, generate_fn: GenerateFn, seeds: List[int],
-                           cfg: RestBucket, opponent_sims: int,
-                           deadline: float) -> List[Episode]:
+                           cfg: RestBucket, opponent_sims: int, deadline: float,
+                           spec: GameSpec) -> List[Episode]:
     """Best-of-N self-play that stops at the wall-clock deadline."""
     episodes: List[Episode] = []
     for seed in seeds:
@@ -220,8 +221,9 @@ def collect_until_deadline(endpoint: str, generate_fn: GenerateFn, seeds: List[i
             if time.monotonic() >= deadline:
                 break
             episodes.append(
-                play_episode(endpoint, LEDUC_GAME_ID, opponent_sims, generate_fn,
-                             temperature=cfg.temperature, seed=seed)
+                play_episode(endpoint, spec.game_id, opponent_sims, generate_fn,
+                             temperature=cfg.temperature, seed=seed,
+                             feature_fn=spec.features_fn, system_prompt=spec.system_prompt)
             )
     return episodes
 
@@ -241,6 +243,7 @@ def rest_loop(
     endpoint: str,
     base_model_path: str,
     out_dir: str,
+    spec: Optional[GameSpec] = None,
     gen_factory: GenFactory = build_vllm_generate_fn,
     sft_fn: SftFn = run_inner_sft,
     collect_fn: CollectFn = collect_until_deadline,
@@ -250,6 +253,7 @@ def rest_loop(
     base_seed: int = 12345,
     log_fn: Callable[[str], None] = print,
 ) -> Dict[str, object]:
+    spec = spec or get_spec("leduc_poker")
     budget = budget or RestBudget(float(os.environ.get("REST_TOTAL_SECONDS") or "3600"))
     kill = kill or KillCriterion()
     accumulated: List[Dict[str, object]] = []
@@ -264,13 +268,14 @@ def rest_loop(
         # Grow: generator is base + previous adapter (the improving policy).
         gen_fn = gen_factory(base_model_path, adapter_path, cfg)
         seeds = sample_seeds(it, cfg.seeds_per_iter, base_seed)
-        episodes = collect_fn(endpoint, gen_fn, seeds, cfg, sims, deadline)
+        episodes = collect_fn(endpoint, gen_fn, seeds, cfg, sims, deadline, spec)
         stats = episode_stats(episodes)
 
         # Label: cold-start uses template Thoughts only when iter-1 is too invalid.
         cold = it == 0 and stats["valid_rate"] < cfg.cold_start_valid_threshold
-        steps = filter_and_extract(episodes, keep_fraction=keep_frac)
-        samples = synthesize(steps, gen_fn, cold_start=cold)
+        steps = filter_and_extract(episodes, keep_fraction=keep_frac,
+                                   potential_fn=spec.potential_fn, feature_fn=spec.features_fn)
+        samples = synthesize(steps, gen_fn, cold_start=cold, system_prompt=spec.system_prompt)
         accumulated.extend(samples)
 
         # Improve: re-anchor SFT on the accumulated dataset.
@@ -308,7 +313,11 @@ def main() -> None:
         raise RuntimeError("MODEL_PATH and ENVIRONMENT_SERVER_URLS are required")
 
     cfg = get_rest_config(estimate_param_billions(base_model_path))
-    result = rest_loop(cfg, endpoints[0], base_model_path, out_dir)
+    if os.environ.get("TASK_ID"):
+        spec = get_spec_by_task_id(int(os.environ["TASK_ID"]))
+    else:
+        spec = get_spec(os.environ.get("GAME", "leduc_poker"))
+    result = rest_loop(cfg, endpoints[0], base_model_path, out_dir, spec=spec)
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, "rest_history.json"), "w") as f:
         json.dump(result["history"], f, indent=2)
@@ -361,7 +370,7 @@ def _selftest() -> None:
         sft_calls.append({"base": base, "dataset": dataset_path})
         return f"{out}/adapter"
 
-    def mock_collect(endpoint, gen, seeds, cfg, sims, deadline):
+    def mock_collect(endpoint, gen, seeds, cfg, sims, deadline, spec):
         return [_win_episode(s, sims) for s in seeds[:3]]
 
     def mock_dataset(samples, out):
@@ -380,6 +389,14 @@ def _selftest() -> None:
     # Accumulation grows monotonically across iterations.
     totals = [h["n_total_samples"] for h in result["history"]]
     assert totals[1] > totals[0] >= 1, totals
+
+    # Spec threading: the same loop runs for a different game without error.
+    res_gin = rest_loop(cfg, "http://x", "/models/base-7b", "/tmp/out2",
+                        spec=get_spec("gin_rummy"),
+                        gen_factory=mock_gen_factory, sft_fn=mock_sft,
+                        collect_fn=mock_collect, dataset_fn=mock_dataset,
+                        budget=RestBudget(1000), kill=KillCriterion(), log_fn=lambda *_: None)
+    assert len(res_gin["history"]) == 2, res_gin
     print("rest_trainer selftest OK")
 
 

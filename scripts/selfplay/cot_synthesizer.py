@@ -48,10 +48,10 @@ def template_thought(step: TrainingStep) -> str:
     return f"I hold {_describe_hand(step.features)}, so I play {step.action_label}."
 
 
-def build_rationalize_prompt(step: TrainingStep) -> Messages:
+def build_rationalize_prompt(step: TrainingStep, system_prompt: str = LEDUC_SYSTEM_PROMPT) -> Messages:
     """STaR hint prompt: reveal the good action, ask only for the reasoning."""
     return [
-        {"role": "system", "content": LEDUC_SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {
             "role": "user",
             "content": (
@@ -64,10 +64,11 @@ def build_rationalize_prompt(step: TrainingStep) -> Messages:
     ]
 
 
-def build_verify_prompt(step: TrainingStep, thought: str) -> Messages:
+def build_verify_prompt(step: TrainingStep, thought: str,
+                        system_prompt: str = LEDUC_SYSTEM_PROMPT) -> Messages:
     """Consistency prompt: recover the action from the Thought alone."""
     return [
-        {"role": "system", "content": LEDUC_SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {
             "role": "user",
             "content": (
@@ -95,24 +96,29 @@ def synthesize_thought(
     generate_fn: GenerateFn,
     temperature: float = 0.7,
     cold_start: bool = False,
+    system_prompt: str = LEDUC_SYSTEM_PROMPT,
 ) -> str:
     if cold_start:
         return template_thought(step)
-    raw = generate_fn([build_rationalize_prompt(step)], n=1, temperature=temperature)[0][0]
+    raw = generate_fn([build_rationalize_prompt(step, system_prompt)],
+                      n=1, temperature=temperature)[0][0]
     thought = clean_thought(raw)
     return thought or template_thought(step)
 
 
-def consistency_ok(step: TrainingStep, thought: str, generate_fn: GenerateFn) -> bool:
-    raw = generate_fn([build_verify_prompt(step, thought)], n=1, temperature=0.0)[0][0]
+def consistency_ok(step: TrainingStep, thought: str, generate_fn: GenerateFn,
+                   system_prompt: str = LEDUC_SYSTEM_PROMPT) -> bool:
+    raw = generate_fn([build_verify_prompt(step, thought, system_prompt)],
+                      n=1, temperature=0.0)[0][0]
     return parse_thought_action(raw, step.legal_actions) == step.action_id
 
 
-def build_sft_sample(step: TrainingStep, thought: str) -> Dict[str, object]:
+def build_sft_sample(step: TrainingStep, thought: str,
+                     system_prompt: str = LEDUC_SYSTEM_PROMPT) -> Dict[str, object]:
     """One {messages: [...]} record with a Thought/Action assistant turn."""
     return {
         "messages": [
-            {"role": "system", "content": LEDUC_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": step.user_prompt or step.observation},
             {"role": "assistant", "content": f"Thought:\n{thought}\n\nAction:\n{step.action_id}"},
         ]
@@ -125,14 +131,16 @@ def synthesize(
     temperature: float = 0.7,
     cold_start: bool = False,
     consistency: bool = True,
+    system_prompt: str = LEDUC_SYSTEM_PROMPT,
 ) -> List[Dict[str, object]]:
     """Rationalize every kept step into an SFT sample, dropping inconsistent ones."""
     samples: List[Dict[str, object]] = []
     for step in steps:
-        thought = synthesize_thought(step, generate_fn, temperature, cold_start)
-        if consistency and not cold_start and not consistency_ok(step, thought, generate_fn):
+        thought = synthesize_thought(step, generate_fn, temperature, cold_start, system_prompt)
+        if consistency and not cold_start and not consistency_ok(
+                step, thought, generate_fn, system_prompt):
             continue
-        samples.append(build_sft_sample(step, thought))
+        samples.append(build_sft_sample(step, thought, system_prompt))
     return samples
 
 

@@ -164,10 +164,10 @@ def build_user_prompt(observation: str) -> str:
     return observation if observation else ""
 
 
-def build_messages(observation: str) -> Messages:
+def build_messages(observation: str, system_prompt: str = LEDUC_SYSTEM_PROMPT) -> Messages:
     """Chat prompt for one decision point: system rules + the current state."""
     return [
-        {"role": "system", "content": LEDUC_SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": build_user_prompt(observation)},
     ]
 
@@ -241,6 +241,7 @@ def play_episode(
     max_turns: int = DEFAULT_MAX_TURNS,
     seed: Optional[int] = None,
     feature_fn: Optional[Callable[[str], Dict[str, object]]] = None,
+    system_prompt: str = LEDUC_SYSTEM_PROMPT,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> Episode:
     """Play a single self-play episode and return the recorded trajectory.
@@ -259,7 +260,8 @@ def play_episode(
         if not legal:
             break
         user_prompt = build_user_prompt(observation)
-        completion = generate_fn([build_messages(observation)], n=1, temperature=temperature)[0][0]
+        completion = generate_fn([build_messages(observation, system_prompt)],
+                                 n=1, temperature=temperature)[0][0]
         action_id = parse_thought_action(completion, legal)
         valid = bool(action_id)
         features = feature_fn(observation) if feature_fn else {}
@@ -300,6 +302,7 @@ def collect_episodes(
     max_turns: int = DEFAULT_MAX_TURNS,
     game_id: Optional[int] = None,
     feature_fn: Optional[Callable[[str], Dict[str, object]]] = None,
+    system_prompt: str = LEDUC_SYSTEM_PROMPT,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> List[Episode]:
     """Best-of-N self-play: ``n_per_seed`` stochastic episodes per seed.
@@ -322,6 +325,7 @@ def collect_episodes(
                     max_turns=max_turns,
                     seed=seed,
                     feature_fn=feature_fn,
+                    system_prompt=system_prompt,
                     timeout=timeout,
                 )
             )
