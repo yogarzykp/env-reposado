@@ -30,8 +30,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence
 
-# A generator maps a batch of prompts to, per prompt, a list of `n` completions.
-#   generate_fn(prompts, n=1, temperature=1.0, max_new_tokens=512) -> List[List[str]]
+# A generator maps a batch of chat prompts to, per prompt, a list of `n`
+# completions. Each chat prompt is a list of {"role", "content"} messages; the
+# backend applies the model's chat template (wired in rest_trainer, Fase 2).
+#   generate_fn(message_batches, n=1, temperature=1.0, max_new_tokens=512)
+#       -> List[List[str]]
+Messages = List[Dict[str, str]]
 GenerateFn = Callable[..., List[List[str]]]
 
 # Leduc poker lives in this validator task-id band (see env_function contract).
@@ -160,6 +164,14 @@ def build_user_prompt(observation: str) -> str:
     return observation if observation else ""
 
 
+def build_messages(observation: str) -> Messages:
+    """Chat prompt for one decision point: system rules + the current state."""
+    return [
+        {"role": "system", "content": LEDUC_SYSTEM_PROMPT},
+        {"role": "user", "content": build_user_prompt(observation)},
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # Thin env-server client (POST /reset, POST /step)
 # --------------------------------------------------------------------------- #
@@ -247,8 +259,7 @@ def play_episode(
         if not legal:
             break
         user_prompt = build_user_prompt(observation)
-        prompt = _chat(user_prompt)
-        completion = generate_fn([prompt], n=1, temperature=temperature)[0][0]
+        completion = generate_fn([build_messages(observation)], n=1, temperature=temperature)[0][0]
         action_id = parse_thought_action(completion, legal)
         valid = bool(action_id)
         features = feature_fn(observation) if feature_fn else {}
@@ -277,12 +288,6 @@ def play_episode(
 def _random_fallback_action(legal_actions: Dict[str, str]) -> str:
     """A uniformly random legal action id (generic, never expert strategy)."""
     return random.choice(list(legal_actions.keys()))
-
-
-def _chat(user_prompt: str) -> str:
-    """Render a minimal chat string. The real backend applies the tokenizer chat
-    template in Fase 2; here we only need a stable, inspectable prompt string."""
-    return f"<system>\n{LEDUC_SYSTEM_PROMPT}\n<user>\n{user_prompt}\n<assistant>\n"
 
 
 def collect_episodes(

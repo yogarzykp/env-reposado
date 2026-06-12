@@ -28,6 +28,7 @@ from typing import Callable, Dict, List
 from selfplay.rollout_collector import (
     LEDUC_SYSTEM_PROMPT,
     GenerateFn,
+    Messages,
     parse_thought_action,
 )
 from selfplay.trajectory_filter import TrainingStep
@@ -47,27 +48,35 @@ def template_thought(step: TrainingStep) -> str:
     return f"I hold {_describe_hand(step.features)}, so I play {step.action_label}."
 
 
-def build_rationalize_prompt(step: TrainingStep) -> str:
+def build_rationalize_prompt(step: TrainingStep) -> Messages:
     """STaR hint prompt: reveal the good action, ask only for the reasoning."""
-    return (
-        f"<system>\n{LEDUC_SYSTEM_PROMPT}\n"
-        f"<user>\n{step.observation}\n\n"
-        f"The strong move here is action {step.action_id} ({step.action_label}). "
-        f"In one or two sentences, explain the reasoning that leads to it. "
-        f"Write only the reasoning, no action id.\n"
-        f"<assistant>\n"
-    )
+    return [
+        {"role": "system", "content": LEDUC_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"{step.observation}\n\n"
+                f"The strong move here is action {step.action_id} ({step.action_label}). "
+                f"In one or two sentences, explain the reasoning that leads to it. "
+                f"Write only the reasoning, no action id."
+            ),
+        },
+    ]
 
 
-def build_verify_prompt(step: TrainingStep, thought: str) -> str:
+def build_verify_prompt(step: TrainingStep, thought: str) -> Messages:
     """Consistency prompt: recover the action from the Thought alone."""
-    return (
-        f"<system>\n{LEDUC_SYSTEM_PROMPT}\n"
-        f"<user>\n{step.observation}\n\n"
-        f"Reasoning: {thought}\n"
-        f"Given this reasoning, output the Action id only.\n"
-        f"<assistant>\nAction:\n"
-    )
+    return [
+        {"role": "system", "content": LEDUC_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"{step.observation}\n\n"
+                f"Reasoning: {thought}\n"
+                f"Given this reasoning, output the Action id only."
+            ),
+        },
+    ]
 
 
 def clean_thought(raw: str) -> str:
@@ -138,10 +147,12 @@ def _selftest() -> None:
         source_game_id=200000000,
     )
 
+    def _user_text(prompts):
+        return prompts[0][-1]["content"]
+
     # Generator: rationalize -> reasoning text; verify -> the correct action id.
     def gen(prompts, n=1, temperature=1.0):
-        p = prompts[0]
-        if "output the Action id only" in p:
+        if "output the Action id only" in _user_text(prompts):
             return [["2"]]
         return [["Thought:\nA pair of Kings is the nuts, so raise for value.\nAction:\n2"]]
 
@@ -157,7 +168,7 @@ def _selftest() -> None:
 
     # Inconsistent verifier -> sample dropped.
     def gen_bad(prompts, n=1, temperature=1.0):
-        if "output the Action id only" in prompts[0]:
+        if "output the Action id only" in _user_text(prompts):
             return [["0"]]
         return [["raise for value"]]
 
