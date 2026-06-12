@@ -23,6 +23,13 @@ TASK_ID=""                                  # optional; overrides GAME if set
 # skill-only = validate generation + SFT + merge WITHOUT an env-server
 SMOKE_MODE="game"
 
+# Auto start+stop the MCTS env-server for game mode (no separate commands needed).
+# Set to 0 to use your own ENVIRONMENT_SERVER_URLS above instead.
+AUTO_ENV_SERVER="1"
+NUM_SERVERS="1"
+ENV_BASE_PORT="8000"
+MCTS_IMAGE="diagonalge/mcts-api:latest"
+
 HOST_OUTPUT_DIR="$HOME/rest_smoke_out"       # trained model lands here (host)
 HF_CACHE_DIR="$HOME/.cache/huggingface"      # persist model downloads
 
@@ -44,6 +51,44 @@ CONTAINER_OUTPUT="/workspace/rest_smoke"
 mkdir -p "$HOST_OUTPUT_DIR" "$HF_CACHE_DIR"
 
 if [ "$SMOKE_MODE" = "skill-only" ]; then REST_SKILL_ONLY=1; else REST_SKILL_ONLY=0; fi
+
+# --- auto-managed env-server (game mode): started before, stopped on exit ---
+STARTED_ENV=0
+cleanup_env() {
+  if [ "$STARTED_ENV" = "1" ]; then
+    for i in $(seq 0 $((NUM_SERVERS - 1))); do docker rm -f "mcts-env-$i" >/dev/null 2>&1 || true; done
+    echo "=== stopped env-server(s) ==="
+  fi
+}
+trap cleanup_env EXIT
+
+if [ "$SMOKE_MODE" = "game" ] && [ "$AUTO_ENV_SERVER" = "1" ]; then
+  echo "=== starting env-server(s): $MCTS_IMAGE ==="
+  docker pull "$MCTS_IMAGE" || echo "WARN: pull failed (using local image if present)"
+  urls=()
+  for i in $(seq 0 $((NUM_SERVERS - 1))); do
+    port=$((ENV_BASE_PORT + i)); name="mcts-env-$i"
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    docker run -d --name "$name" -p "${port}:8000" "$MCTS_IMAGE" >/dev/null
+    urls+=("http://localhost:${port}")
+  done
+  STARTED_ENV=1
+  ENVIRONMENT_SERVER_URLS=$(IFS=,; echo "${urls[*]}")
+  echo "  ENVIRONMENT_SERVER_URLS=$ENVIRONMENT_SERVER_URLS"
+  if command -v curl >/dev/null 2>&1; then
+    echo "  waiting for env-server readiness..."
+    for _ in $(seq 1 30); do
+      if curl -s -o /dev/null -X POST "http://localhost:${ENV_BASE_PORT}/reset" \
+           -H 'Content-Type: application/json' \
+           -d '{"task_id":200000001,"seed":1,"opponent":"mcts","mcts_max_simulations":5,"mcts_num_rollouts":1}'; then
+        echo "  env-server ready"; break
+      fi
+      sleep 2
+    done
+  else
+    echo "  curl not found; waiting 10s for warmup"; sleep 10
+  fi
+fi
 
 export MODEL_PATH ENVIRONMENT_SERVER_URLS GAME TASK_ID CUDA_VISIBLE_DEVICES
 export REST_ITERS REST_SEEDS_PER_ITER REST_N_PER_SEED REST_TOTAL_SECONDS CFR_ITERS REST_SKILL_TASKS REST_SKILL_ONLY
