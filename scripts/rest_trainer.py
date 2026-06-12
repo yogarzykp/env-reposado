@@ -166,6 +166,10 @@ def run_inner_sft(base_model_path: str, dataset_path: str, out_dir: str,
 
     Always starts from ``base_model_path`` (never the previous adapter) so drift
     does not compound across ReST iterations.
+
+    Target stack: the env/GRPO container (trl==0.27.0, transformers==4.57.5,
+    peft==0.18.1). ``assistant_only_loss`` is the one knob to confirm at smoke;
+    if unsupported, fall back to manual label masking of non-assistant spans.
     """
     import torch  # lazy
     from datasets import load_from_disk
