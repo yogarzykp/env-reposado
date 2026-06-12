@@ -40,9 +40,12 @@ REST_TOTAL_SECONDS=1200
 CFR_ITERS=3000
 REST_SKILL_TASKS=0
 
-HF_REPO=""                                   # e.g. yogarzykp/env-reposado-leduc-smoke
+# HF upload. Leave HF_USERNAME empty to skip. The repo name is auto-built as
+#   <prefix>-<game>-<date>_<model>   (like env-purpleboost's expected-repo-name).
+HF_USERNAME=""                               # e.g. yogarzykp  (empty = skip upload)
 HF_TOKEN=""                                  # HF write token
 HF_PRIVATE="1"
+HF_REPO_PREFIX="env-reposado"
 # -----------------------------------------------------------------------------
 
 set -e
@@ -88,6 +91,16 @@ if [ "$SMOKE_MODE" = "game" ] && [ "$AUTO_ENV_SERVER" = "1" ]; then
   else
     echo "  curl not found; waiting 10s for warmup"; sleep 10
   fi
+fi
+
+# Build a unique HF repo id: <username>/<prefix>-<game>-<date>_<model>.
+if [ -n "$HF_USERNAME" ]; then
+  MODEL_SAFE=$(echo "$MODEL_PATH" | sed 's#/#_#g')
+  EXPECTED_REPO_NAME="${HF_REPO_PREFIX}-${TASK_ID:-$GAME}-$(date +%Y%m%d-%H%M)_${MODEL_SAFE}"
+  HF_REPO="${HF_USERNAME}/${EXPECTED_REPO_NAME}"
+  echo "=== HF target repo: $HF_REPO ==="
+else
+  HF_REPO=""
 fi
 
 export MODEL_PATH ENVIRONMENT_SERVER_URLS GAME TASK_ID CUDA_VISIBLE_DEVICES
