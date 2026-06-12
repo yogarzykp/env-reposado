@@ -86,7 +86,7 @@ repo = os.environ["HF_REPO"]
 api.create_repo(repo, repo_type="model", exist_ok=True,
                 private=os.environ.get("HF_PRIVATE", "1") == "1")
 api.upload_folder(folder_path=os.environ["OUTPUT_DIR"], repo_id=repo, repo_type="model",
-                  ignore_patterns=["iter*_data/*", "iter*_sft/*"])
+                  ignore_patterns=["*_data/*", "*_sft/*", "*.arrow"])
 print(f"uploaded merged model to https://huggingface.co/{repo}")
 PY
   else
