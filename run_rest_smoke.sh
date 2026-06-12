@@ -34,6 +34,10 @@ REST_SKILL_TASKS=0          # >0 adds the self-instruct skill stream
 HF_REPO=""                  # e.g. yogarzykp/env-reposado-leduc-smoke
 HF_TOKEN=""                 # your HF write token
 HF_PRIVATE="1"              # 1 = private repo
+
+# Python env that has vllm/trl/transformers. Leave empty to auto-detect a few
+# common locations; set it explicitly if your deps live elsewhere.
+VENV_PATH=""                # e.g. /workspace/.grpo_env
 # -----------------------------------------------------------------------------
 
 set -e
@@ -43,6 +47,28 @@ export MODEL_PATH ENVIRONMENT_SERVER_URLS OUTPUT_DIR
 export REST_ITERS REST_SEEDS_PER_ITER REST_N_PER_SEED REST_TOTAL_SECONDS CFR_ITERS REST_SKILL_TASKS
 export BNB_CUDA_VERSION="${BNB_CUDA_VERSION:-122}"
 if [ -n "$TASK_ID" ]; then export TASK_ID; else export GAME; fi
+
+# Activate the training venv (vllm/trl live there, not in the system python).
+if [ -z "$VENV_PATH" ]; then
+  for cand in /workspace/.grpo_env /workspace/venv "$HOME/.grpo_env" "$HOME/venv"; do
+    [ -f "$cand/bin/activate" ] && VENV_PATH="$cand" && break
+  done
+fi
+if [ -n "$VENV_PATH" ] && [ -f "$VENV_PATH/bin/activate" ]; then
+  echo "activating venv: $VENV_PATH"
+  # shellcheck disable=SC1091
+  source "$VENV_PATH/bin/activate"
+fi
+
+# Preflight: fail early with a clear message instead of a deep traceback.
+if ! python3 -c "import vllm" >/dev/null 2>&1; then
+  echo "ERROR: 'vllm' not importable by $(command -v python3)."
+  echo "Fix one of:"
+  echo "  1) set VENV_PATH in this script to the env that has vllm/trl/transformers, or"
+  echo "  2) install deps:  pip install -r ${SCRIPT_DIR}/scripts/grpo_requirements.txt"
+  echo "  3) run inside the standalone-text-trainer container (it ships the deps)"
+  exit 1
+fi
 
 echo "=== ReST smoke: ${TASK_ID:-$GAME} | model=${MODEL_PATH} | iters=${REST_ITERS} ==="
 python3 "${SCRIPT_DIR}/scripts/rest_trainer.py"
