@@ -321,6 +321,7 @@ def main() -> None:
 
 
 def _selftest() -> None:
+    os.environ["REST_USE_CFR"] = "0"  # heuristic Phi: keep the loop test fast
     from selfplay.rollout_collector import Turn
     from shaping import leduc_features
 

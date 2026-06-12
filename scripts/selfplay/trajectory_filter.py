@@ -138,6 +138,7 @@ def filter_and_extract(
 
 
 def _selftest() -> None:
+    os.environ["REST_USE_CFR"] = "0"  # heuristic Phi: keep the test fast
     from selfplay.rollout_collector import Episode, Turn
 
     def mk_turn(obs, aid, reward, valid=True):

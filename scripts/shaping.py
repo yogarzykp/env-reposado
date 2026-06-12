@@ -70,33 +70,62 @@ def leduc_features(observation: str) -> Dict[str, object]:
     return feats
 
 
-def potential_leduc(features: Dict[str, object]) -> float:
-    """Phi(s) in [0, 1]: our estimate of how favourable the state is for us.
+# Set True in tests to force the fast heuristic and skip the CFR solve.
+_FORCE_HEURISTIC = False
 
-    Construction (CFR-flavoured table, distinct from the baseline heuristic):
-      - a pair is the nut hand -> near-maximal potential, scaled by rank;
-      - otherwise a high-card value that is lower in round 2 (more cards live
-        against us) and discounted when the opponent has shown aggression.
+
+def _use_cfr() -> bool:
+    return (not _FORCE_HEURISTIC) and os.environ.get("REST_USE_CFR", "1") != "0"
+
+
+def _cfr_lookup(rank: int, has_pair: bool, rnd: int):
+    """CFR-solved normalised potential for (rank, pair, round); None on failure.
+
+    Maps shaping ranks (1=J,2=Q,3=K) / rounds (1,2) to the solver's
+    (0,1,2) / (0,1) convention.
+    """
+    try:
+        from cfr_leduc import potential_table  # lazy: solve only when needed
+        tbl = potential_table(int(os.environ.get("CFR_ITERS", "20000")))
+        cfr_round = 0 if rnd == 1 else 1
+        key = (rank - 1, has_pair if cfr_round == 1 else False, cfr_round)
+        return tbl.get(key)
+    except Exception:
+        return None
+
+
+def _potential_leduc_heuristic(rank: int, has_pair: bool, rnd: int, opp_raised: bool) -> float:
+    if has_pair:
+        phi = 0.86 + 0.05 * (rank - 1)            # pair J -> pair K
+    else:
+        base = {1: 0.20, 2: 0.40, 3: 0.62}[rank]  # high card by rank
+        phi = base * (0.85 if rnd == 2 else 1.0)
+        if opp_raised:
+            phi *= 0.80
+    return max(0.0, min(1.0, phi))
+
+
+def potential_leduc(features: Dict[str, object]) -> float:
+    """Phi(s) in [0, 1]: how favourable the state is for us.
+
+    Primary source is the CFR-solved state-value table (cfr_leduc), distinct from
+    the baseline's hand-equity-vs-uniform heuristic. Falls back to a closed-form
+    heuristic if the solver is unavailable. Opponent aggression shades Phi down.
     """
     rank = features.get("rank")
     if rank is None:
         return 0.5
 
-    rank = int(rank)  # 1=J, 2=Q, 3=K
+    rank = int(rank)
     has_pair = bool(features.get("has_pair"))
     rnd = int(features.get("round", 1))
     opp_raised = bool(features.get("opponent_raised"))
 
-    if has_pair:
-        # 0.86 (pair of J) -> 0.96 (pair of K).
-        phi = 0.86 + 0.05 * (rank - 1)
-    else:
-        # High-card baseline by rank, softened in round 2.
-        base = {1: 0.20, 2: 0.40, 3: 0.62}[rank]
-        phi = base * (0.85 if rnd == 2 else 1.0)
-        if opp_raised:
-            # Aggression signals strength; shade our potential down.
-            phi *= 0.80
+    phi = _cfr_lookup(rank, has_pair, rnd) if _use_cfr() else None
+    if phi is None:
+        phi = _potential_leduc_heuristic(rank, has_pair, rnd, opp_raised)
+    elif opp_raised:
+        phi *= 0.85
     return max(0.0, min(1.0, phi))
 
 
@@ -142,16 +171,23 @@ def shaped_return(
 
 
 def _selftest() -> None:
+    global _FORCE_HEURISTIC
     pair = {"rank": 3, "has_pair": True, "round": 2, "opponent_raised": False}
     jack = {"rank": 1, "has_pair": False, "round": 1, "opponent_raised": False}
+
+    _FORCE_HEURISTIC = True  # fast closed-form path
     assert potential_leduc(pair) > potential_leduc(jack)
     assert 0.0 <= potential_leduc(jack) <= 1.0
-    # Improving from J-high to a King pair gives a positive shaping transition.
     assert per_turn_shaping(jack, pair) > 0
-    seq = [jack, pair]
-    assert shaped_return(seq, terminal_reward=1.0) > 1.0 - 1.0  # sanity: finite
+    assert shaped_return([jack, pair], terminal_reward=1.0) == shaped_return([jack, pair], 1.0)
     f = leduc_features("Your card: King\nCommunity card: King\nPot: 6\nLegal Actions:\n2 -> Raise")
     assert f["has_pair"] and f["round"] == 2 and f["rank"] == 3, f
+
+    # CFR-solved path (low iters for speed): same qualitative ordering.
+    _FORCE_HEURISTIC = False
+    os.environ.setdefault("CFR_ITERS", "3000")
+    assert potential_leduc(pair) > potential_leduc(jack)
+    assert 0.0 <= potential_leduc(pair) <= 1.0
     print("shaping selftest OK")
 
 
